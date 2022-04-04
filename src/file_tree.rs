@@ -35,36 +35,35 @@ impl FileNode {
         if let Some(node) = parent.borrow().children.get(name) {
             // tree node already exists, replace the payload, keep the children
             node.borrow_mut().data.file_info = data;
-            Rc::clone(node)
-        } else {
-            let mut path = parent.borrow().path.clone();
-            path.push('/');
-            // white out prefixes are fictitious on leaf nodes
-            if let Some(s) = name.strip_prefix(WHITEOUT_PREFIX) {
-                path.push_str(s);
-            } else {
-                path.push_str(name);
-            }
-            let child = Rc::new(RefCell::new(FileNode {
-                tree: Weak::clone(&parent.borrow().tree),
-                parent: Rc::downgrade(&parent),
-                name: name.to_string(),
-                data: NodeData {
-                    file_info: data,
-                    ..Default::default()
-                },
-                path,
-                ..Default::default()
-            }));
-            parent
-                .borrow_mut()
-                .children
-                .insert(name.to_string(), Rc::clone(&child));
-            if let Some(t) = parent.borrow().tree.upgrade() {
-                t.borrow_mut().size += 1;
-            }
-            child
+            return Rc::clone(node);
         }
+        let mut path = parent.borrow().path.clone();
+        path.push('/');
+        // white out prefixes are fictitious on leaf nodes
+        if let Some(s) = name.strip_prefix(WHITEOUT_PREFIX) {
+            path.push_str(s);
+        } else {
+            path.push_str(name);
+        }
+        let child = Rc::new(RefCell::new(FileNode {
+            tree: Weak::clone(&parent.borrow().tree),
+            parent: Rc::downgrade(&parent),
+            name: name.to_string(),
+            data: NodeData {
+                file_info: data,
+                ..Default::default()
+            },
+            path,
+            ..Default::default()
+        }));
+        parent
+            .borrow_mut()
+            .children
+            .insert(name.to_string(), Rc::clone(&child));
+        if let Some(t) = parent.borrow().tree.upgrade() {
+            t.borrow_mut().size += 1;
+        }
+        child
     }
 }
 
@@ -77,7 +76,7 @@ impl<R: Read> TryFrom<Archive<R>> for FileTree {
             let a = tree.borrow();
             let mut root = a.root.borrow_mut();
             root.tree = Rc::downgrade(&tree);
-            root.path = "/".to_string();
+            //root.path = "/".to_string(); // root路径初始值设为空，因为添加子结点都会加/前缀； 可以在最后再设为/
         }
         'outer: for entry in ar.entries()? {
             let mut e = entry?;
@@ -103,20 +102,23 @@ impl<R: Read> TryFrom<Archive<R>> for FileTree {
                             }
                             // find or create node
                             let node_cloned = Rc::clone(&node);
+                            // if let node_cloned.borrow() {} else {}, 在第2个块里不会drop引用,
+                            // 拆开就会drop掉，不需要在}后加;
                             if let Some(tmp) = node_cloned.borrow().children.get(node_name) {
+                                // 需要复制一个node_cloned，否则在这里node有引用不允许修改
                                 node = Rc::clone(tmp);
-                            } else {
-                                // don't add paths that should be deleted
-                                if node_name.starts_with(DOUBLE_WHITEOUT_PREFIX) {
-                                    continue 'outer;
-                                }
-                                // don't attach the payload. The payload is destined for the Path's end node, not any intermediary node.
-                                node = FileNode::add_child(
-                                    Rc::clone(&node),
-                                    node_name,
-                                    Default::default(),
-                                );
-                            };
+                                continue;
+                            }
+                            // don't add paths that should be deleted
+                            if node_name.starts_with(DOUBLE_WHITEOUT_PREFIX) {
+                                continue 'outer;
+                            }
+                            // don't attach the payload. The payload is destined for the Path's end node, not any intermediary node.
+                            node = FileNode::add_child(
+                                Rc::clone(&node),
+                                node_name,
+                                Default::default(),
+                            );
                         }
                         // attach payload to the last specified node
                         let mut hash = 0;

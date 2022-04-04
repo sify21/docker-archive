@@ -1,5 +1,7 @@
 pub mod error;
 mod file_tree;
+#[cfg(test)]
+mod tests;
 
 use crate::error::DockerArchiveError;
 use file_tree::FileTree;
