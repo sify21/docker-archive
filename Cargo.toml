@@ -10,7 +10,7 @@ license = "MIT"
 tar = "0.4"
 flate2 = "1.0"
 thiserror = "1.0"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 path-clean = "0.1.0"
 xxhash-rust = { version = "0.8.4", features = ["xxh3"] }

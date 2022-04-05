@@ -1,55 +1,58 @@
-pub mod error;
+mod error;
 mod file_tree;
 #[cfg(test)]
 mod tests;
 
-use crate::error::DockerArchiveError;
+pub use error::DockerArchiveError;
 use file_tree::FileTree;
 use flate2::read::GzDecoder;
-use serde::Deserialize;
+use path_clean::clean;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use tar::{Archive, EntryType};
 
-type Result<T> = std::result::Result<T, DockerArchiveError>;
+pub type Result<T> = std::result::Result<T, DockerArchiveError>;
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Serialize)]
 pub struct ImageArchive {
     pub manifest: Manifest,
     pub config: Config,
-    pub layer_map: HashMap<String, FileTree>,
+    pub layer_map: HashMap<String, Rc<FileTree>>,
 }
 
-#[derive(Default, Debug, Deserialize)]
+#[derive(Default, Debug, Deserialize, Serialize)]
 pub struct Manifest {
     #[serde(rename = "Config")]
     pub config_path: String,
     #[serde(rename = "RepoTags")]
     pub repo_tags: Vec<String>,
+    // layers of this image in order (oldest -> newest)
     #[serde(rename = "Layers")]
     pub layer_tar_paths: Vec<String>,
 }
 
-#[derive(Default, Debug, Deserialize)]
+#[derive(Default, Debug, Deserialize, Serialize)]
 pub struct Config {
     pub history: Vec<HistoryEntry>,
     pub rootfs: RootFS,
 }
 
-#[derive(Default, Debug, Deserialize)]
+#[derive(Default, Debug, Deserialize, Serialize)]
 pub struct RootFS {
     #[serde(rename = "type")]
     pub typ: String,
     pub diff_ids: Vec<String>,
 }
 
-#[derive(Default, Debug, Deserialize)]
+#[derive(Default, Debug, Deserialize, Serialize)]
 pub struct HistoryEntry {
-    #[serde(skip)]
+    #[serde(default)]
     pub id: String,
-    #[serde(skip)]
+    #[serde(default)]
     pub size: u64,
     pub created: String,
     #[serde(default)]
@@ -70,6 +73,8 @@ impl ImageArchive {
         let mut ar = Archive::new(obj);
         // store discovered json files in a map so we can read the image in one pass
         let mut json_files: HashMap<String, Vec<u8>> = HashMap::new();
+        // store layer tar symlink mapping to avoid construct the same FileTree twice
+        let mut layer_tar_links: HashMap<String, String> = HashMap::new();
         for entry in ar.entries()? {
             let mut e = entry?;
             // some layer tars can be relative layer symlinks to other layer tars
@@ -77,14 +82,42 @@ impl ImageArchive {
                 EntryType::Symlink | EntryType::Regular => {
                     if let Some(name) = e.path()?.to_str().map(|s| s.to_string()) {
                         if name.ends_with(".tar") {
-                            let mut layer_tree: FileTree = Archive::new(e).try_into()?;
-                            layer_tree.name = name.clone();
-                            img.layer_map.insert(name, layer_tree);
+                            if e.header().entry_type().eq(&EntryType::Symlink) {
+                                if let Ok(Some(p)) = e.header().link_name() {
+                                    let tmp = PathBuf::from(&name);
+                                    if let Some(tmp_parent) = tmp.parent() {
+                                        layer_tar_links.insert(
+                                            name,
+                                            clean(&tmp_parent.join(p).to_string_lossy()),
+                                        );
+                                    } else {
+                                        layer_tar_links.insert(name, clean(&p.to_string_lossy()));
+                                    }
+                                }
+                            } else {
+                                let mut layer_tree: FileTree = Archive::new(e).try_into()?;
+                                layer_tree.name = name.clone();
+                                img.layer_map.insert(name, Rc::new(layer_tree));
+                            }
                         } else if name.ends_with(".tar.gz") || name.ends_with("tgz") {
-                            let mut layer_tree: FileTree =
-                                Archive::new(GzDecoder::new(e)).try_into()?;
-                            layer_tree.name = name.clone();
-                            img.layer_map.insert(name, layer_tree);
+                            if e.header().entry_type().eq(&EntryType::Symlink) {
+                                if let Ok(Some(p)) = e.header().link_name() {
+                                    let tmp = PathBuf::from(&name);
+                                    if let Some(tmp_parent) = tmp.parent() {
+                                        layer_tar_links.insert(
+                                            name,
+                                            clean(&tmp_parent.join(p).to_string_lossy()),
+                                        );
+                                    } else {
+                                        layer_tar_links.insert(name, clean(&p.to_string_lossy()));
+                                    }
+                                }
+                            } else {
+                                let mut layer_tree: FileTree =
+                                    Archive::new(GzDecoder::new(e)).try_into()?;
+                                layer_tree.name = name.clone();
+                                img.layer_map.insert(name, Rc::new(layer_tree));
+                            }
                         } else if name.ends_with(".json") || name.starts_with("sha256:") {
                             let mut content = vec![];
                             e.read_to_end(&mut content)?;
@@ -93,6 +126,12 @@ impl ImageArchive {
                     }
                 }
                 _ => (),
+            }
+        }
+        for (k, v) in layer_tar_links.iter() {
+            // 2PB problem: https://github.com/rust-lang/rust/issues/59159
+            if let Some(tree) = img.layer_map.get(v).map(Rc::clone) {
+                img.layer_map.insert(k.clone(), tree);
             }
         }
         if let Some(data) = json_files.get("manifest.json") {

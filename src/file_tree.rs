@@ -1,6 +1,7 @@
 use crate::error::DockerArchiveError;
 use crate::Result;
 use path_clean::clean;
+use serde::Serialize;
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 use std::{collections::HashMap, io::Read};
@@ -11,18 +12,44 @@ use xxhash_rust::xxh3::xxh3_64;
 const WHITEOUT_PREFIX: &'static str = ".wh.";
 const DOUBLE_WHITEOUT_PREFIX: &'static str = ".wh..wh..";
 
-#[derive(Debug, Default)]
+mod uuid_serde {
+    use std::str::FromStr;
+
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
+    use uuid::Uuid;
+    pub fn serialize<S>(uuid: &Uuid, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&uuid.to_string())
+    }
+
+    #[allow(dead_code)]
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Uuid, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = <&str>::deserialize(deserializer)?;
+        Uuid::from_str(s).map_err(Error::custom)
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
 pub struct FileTree {
     pub root: Rc<RefCell<FileNode>>,
     pub size: u64,
     pub file_size: u64,
     pub name: String,
+    #[serde(with = "uuid_serde")]
     pub id: Uuid,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct FileNode {
+    // serde don't support cyclic data structures(https://github.com/serde-rs/serde/issues/1361)
+    #[serde(skip)]
     pub tree: Weak<RefCell<FileTree>>,
+    #[serde(skip)]
     pub parent: Weak<RefCell<FileNode>>,
     pub name: String,
     pub data: NodeData,
@@ -127,8 +154,9 @@ impl<R: Read> TryFrom<Archive<R>> for FileTree {
                             e.read_to_end(&mut data)?;
                             hash = xxh3_64(data.as_slice());
                         }
+                        let path = node.borrow().path.clone();
                         node.borrow_mut().data.file_info = FileInfo {
-                            path: name,
+                            path,
                             hash,
                             ..e.header().into()
                         };
@@ -137,6 +165,8 @@ impl<R: Read> TryFrom<Archive<R>> for FileTree {
                 tree.borrow_mut().file_size += e.size();
             }
         }
+        // root的path设为/
+        tree.borrow().root.borrow_mut().path = "/".to_string();
         match Rc::try_unwrap(tree) {
             Ok(ret) => Ok(ret.take()),
             Err(origial) => Err(DockerArchiveError::InternalLogicError(format!(
@@ -148,7 +178,7 @@ impl<R: Read> TryFrom<Archive<R>> for FileTree {
 }
 
 // NodeData is the payload for a FileNode
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct NodeData {
     pub view_info: ViewInfo,
     pub file_info: FileInfo,
@@ -156,14 +186,14 @@ pub struct NodeData {
 }
 
 // ViewInfo contains UI specific detail for a specific FileNode
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct ViewInfo {
     pub collapsed: bool,
     pub hidden: bool,
 }
 
 // FileInfo contains tar metadata for a specific FileNode
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct FileInfo {
     pub path: String,
     pub type_flag: u8,
@@ -202,7 +232,7 @@ impl From<&tar::Header> for FileInfo {
 }
 
 // DiffType defines the comparison result between two FileNodes
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub enum DiffType {
     Unmodified,
     Modified,
