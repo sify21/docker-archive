@@ -1,8 +1,16 @@
 [package]
 name = "docker-archive"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
+authors = ["sify21@163.com"]
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/sify21/docker-archive"
+description = """
+A Rust library to insecpt a docker archive.
+"""
+categories = ["parser-implementations"]
+keywords = ["docker", "docker-archive"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
