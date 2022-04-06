@@ -1,1 +1,1 @@
-A [docker archive](https://github.com/moby/moby/tree/master/image/spec) inspector in Rust. Inspired by [dive](https://github.com/wagoodman/dive), almost a direct translate from it without UI.
+A Rust library to insecpt a [docker archive](https://github.com/moby/moby/tree/master/image/spec). Inspired by [dive](https://github.com/wagoodman/dive), almost a direct translate from it but without UI.
