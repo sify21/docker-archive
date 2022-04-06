@@ -10,10 +10,12 @@ use path_clean::clean;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 use tar::{Archive, EntryType};
+use which::which;
 
 pub type Result<T> = std::result::Result<T, DockerArchiveError>;
 
@@ -29,7 +31,7 @@ pub struct Manifest {
     #[serde(rename = "Config")]
     pub config_path: String,
     #[serde(rename = "RepoTags")]
-    pub repo_tags: Vec<String>,
+    pub repo_tags: Option<Vec<String>>,
     // layers of this image in order (oldest -> newest)
     #[serde(rename = "Layers")]
     pub layer_tar_paths: Vec<String>,
@@ -63,9 +65,24 @@ pub struct HistoryEntry {
 }
 
 impl ImageArchive {
+    pub fn new_from_url(img_url: &str) -> Result<Self> {
+        let executable = which("docker").map_or_else(|_| which("podman"), |i| Ok(i))?;
+        let mut child = Command::new(executable)
+            .arg("image")
+            .arg("save")
+            .arg(img_url)
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let stdout = child
+            .stdout
+            .as_mut()
+            .ok_or(DockerArchiveError::StdoutError)?;
+        Self::new_from_reader(BufReader::new(stdout))
+    }
+
     pub fn new_from_file<P: AsRef<Path>>(tar_file: P) -> Result<Self> {
         let file = OpenOptions::new().read(true).open(tar_file)?;
-        Self::new_from_reader(file)
+        Self::new_from_reader(BufReader::new(file))
     }
 
     pub fn new_from_reader<R: Read>(obj: R) -> Result<Self> {

@@ -12,4 +12,8 @@ pub enum DockerArchiveError {
     DeJson(#[from] serde_json::Error),
     #[error("inter code logic error: {0:?}")]
     InternalLogicError(String),
+    #[error("docker/podman executable not found: {0:?}")]
+    WhichError(#[from] which::Error),
+    #[error("fail to read stdout from docker/podman child process")]
+    StdoutError,
 }
