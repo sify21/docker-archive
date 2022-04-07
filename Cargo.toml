@@ -23,6 +23,7 @@ serde_json = "1.0"
 path-clean = "0.1.0"
 xxhash-rust = { version = "0.8.4", features = ["xxh3"] }
 which = "4.2.5"
+itertools = "0.10.3"
 
 [dependencies.uuid]
 version = "1.0.0-alpha.1"
