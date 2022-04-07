@@ -4,7 +4,7 @@ mod file_tree;
 mod tests;
 
 pub use error::DockerArchiveError;
-use file_tree::FileTree;
+pub use file_tree::FileTree;
 use flate2::read::GzDecoder;
 use path_clean::clean;
 use serde::{Deserialize, Serialize};

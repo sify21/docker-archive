@@ -53,6 +53,22 @@ struct CompareMark {
 }
 
 impl FileTree {
+    pub fn search<E>(tree: Rc<RefCell<Self>>, evaluator: &E) -> Vec<Rc<RefCell<FileNode>>>
+    where
+        E: Fn(&FileNode) -> bool,
+    {
+        let mut ret = vec![];
+        let root = Rc::clone(&tree.borrow().root);
+        FileNode::visit_depth_child_first(
+            root,
+            &mut |node| {
+                ret.push(node);
+            },
+            evaluator,
+        );
+        ret
+    }
+
     pub fn copy(tree: Rc<RefCell<Self>>) -> Rc<RefCell<Self>> {
         let new_tree = Rc::new(RefCell::new(FileTree {
             size: tree.borrow().size,
