@@ -8,6 +8,7 @@ use file_tree::FileTree;
 use flate2::read::GzDecoder;
 use path_clean::clean;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{BufReader, Read};
@@ -23,7 +24,8 @@ pub type Result<T> = std::result::Result<T, DockerArchiveError>;
 pub struct ImageArchive {
     pub manifest: Manifest,
     pub config: Config,
-    pub layer_map: HashMap<String, Rc<FileTree>>,
+    // layer_tar_path -> FileTree
+    pub layer_map: HashMap<String, Rc<RefCell<FileTree>>>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]
@@ -112,9 +114,9 @@ impl ImageArchive {
                                     }
                                 }
                             } else {
-                                let mut layer_tree: FileTree = Archive::new(e).try_into()?;
-                                layer_tree.name = name.clone();
-                                img.layer_map.insert(name, Rc::new(layer_tree));
+                                let layer_tree = FileTree::build_from_layer_tar(Archive::new(e))?;
+                                layer_tree.borrow_mut().name = name.clone();
+                                img.layer_map.insert(name, layer_tree);
                             }
                         } else if name.ends_with(".tar.gz") || name.ends_with("tgz") {
                             if e.header().entry_type().eq(&EntryType::Symlink) {
@@ -130,10 +132,11 @@ impl ImageArchive {
                                     }
                                 }
                             } else {
-                                let mut layer_tree: FileTree =
-                                    Archive::new(GzDecoder::new(e)).try_into()?;
-                                layer_tree.name = name.clone();
-                                img.layer_map.insert(name, Rc::new(layer_tree));
+                                let layer_tree = FileTree::build_from_layer_tar(Archive::new(
+                                    GzDecoder::new(e),
+                                ))?;
+                                layer_tree.borrow_mut().name = name.clone();
+                                img.layer_map.insert(name, layer_tree);
                             }
                         } else if name.ends_with(".json") || name.starts_with("sha256:") {
                             let mut content = vec![];
@@ -183,5 +186,17 @@ impl ImageArchive {
             ));
         }
         Ok(img)
+    }
+
+    pub fn combined_tree(&self) -> Rc<RefCell<FileTree>> {
+        FileTree::stack_trees(
+            self.manifest
+                .layer_tar_paths
+                .iter()
+                .map(|path| self.layer_map.get(path))
+                .filter(|i| i.is_some())
+                .map(|i| Rc::clone(i.unwrap()))
+                .collect(),
+        )
     }
 }

@@ -45,9 +45,130 @@ pub struct FileTree {
     pub id: Uuid,
 }
 
+struct CompareMark {
+    pub lower_node: Rc<RefCell<FileNode>>,
+    pub upper_node: Rc<RefCell<FileNode>>,
+    pub tentative: Option<DiffType>,
+    pub finalis: Option<DiffType>,
+}
+
 impl FileTree {
+    pub fn copy(tree: Rc<RefCell<Self>>) -> Rc<RefCell<Self>> {
+        let new_tree = Rc::new(RefCell::new(FileTree {
+            size: tree.borrow().size,
+            file_size: tree.borrow().file_size,
+            ..Default::default()
+        }));
+        let new_tree_root = FileNode::copy(
+            Rc::clone(&tree.borrow().root),
+            Rc::clone(&new_tree.borrow().root),
+        );
+        // update the tree pointers
+        FileNode::visit_depth_child_first(
+            Rc::clone(&new_tree_root),
+            &mut |node| {
+                node.borrow_mut().tree = Rc::downgrade(&new_tree);
+            },
+            &|_| true,
+        );
+        // assign the node as root
+        new_tree.borrow_mut().root = new_tree_root;
+        new_tree
+    }
+
+    // combines an array of trees into a single tree
+    pub fn stack_trees(trees: Vec<Rc<RefCell<FileTree>>>) -> Rc<RefCell<FileTree>> {
+        let tree = FileTree::copy(Rc::clone(&trees[0]));
+        for i in 1..trees.len() {
+            FileTree::stack(Rc::clone(&tree), Rc::clone(&trees[i]))
+        }
+        tree
+    }
+
+    // takes two trees and combines them together. This is done by "stacking" the upper tree on top of the lower tree.
+    pub fn stack(lower: Rc<RefCell<Self>>, upper: Rc<RefCell<Self>>) {
+        let upper_root = Rc::clone(&upper.borrow().root);
+        FileNode::visit_depth_child_first(
+            upper_root,
+            &mut |upper_node| {
+                let path = upper_node.borrow().path.clone();
+                if upper_node.borrow().is_whiteout() {
+                    FileTree::remove_path(Rc::clone(&lower), &path);
+                    return;
+                }
+                FileTree::add_path(
+                    Rc::clone(&lower),
+                    &path,
+                    upper_node.borrow().data.file_info.clone(),
+                );
+            },
+            &|_| true,
+        );
+    }
+
     // marks the FileNodes in the owning (lower) tree with DiffType annotations when compared to the given (upper) tree
-    pub fn compare_mark(&self, upper: &Self) {}
+    pub fn compare_mark(lower: Rc<RefCell<Self>>, upper: Rc<RefCell<Self>>) {
+        let mut modifications = vec![];
+        // we must visit from the leaves upwards to ensure that diff types can be derived from and assigned to children
+        FileNode::visit_depth_child_first(
+            Rc::clone(&upper.borrow().root),
+            &mut |upper_node| {
+                let path = upper_node.borrow().path.clone();
+                if upper_node.borrow().is_whiteout() {
+                    if let Some(lower_node) = FileTree::get_node(Rc::clone(&lower), &path) {
+                        FileNode::assign_diff_type(lower_node, DiffType::Removed);
+                    }
+                    return;
+                }
+                // note: since we are not comparing against the original tree (copying the tree is expensive) we may mark the parent of an added node incorrectly as modified. This will be corrected later.
+                let lower_node = FileTree::get_node(Rc::clone(&lower), &path);
+                if lower_node.is_none() {
+                    let (_, new_nodes) = FileTree::add_path(
+                        Rc::clone(&lower),
+                        &path,
+                        upper_node.borrow().data.file_info.clone(),
+                    );
+                    for new_node in new_nodes.iter().rev() {
+                        modifications.push(CompareMark {
+                            lower_node: Rc::clone(new_node),
+                            upper_node: Rc::clone(&upper_node),
+                            tentative: None,
+                            finalis: Some(DiffType::Added),
+                        });
+                    }
+                    return;
+                }
+                // the file exists in the lower layer
+                let lower_node = lower_node.unwrap();
+                let diff_type =
+                    FileNode::compare(Some(Rc::clone(&lower_node)), Some(Rc::clone(&upper_node)));
+                modifications.push(CompareMark {
+                    lower_node: Rc::clone(&lower_node),
+                    upper_node: Rc::clone(&upper_node),
+                    tentative: Some(diff_type),
+                    finalis: None,
+                })
+            },
+            &|_| true,
+        );
+        // take note of the comparison results on each note in the lower tree
+        for pair in modifications.iter() {
+            if let Some(diff_type) = pair.finalis {
+                FileNode::assign_diff_type(Rc::clone(&pair.lower_node), diff_type);
+            } else {
+                let lower_node_diff_type = pair.lower_node.borrow().data.diff_type;
+                if lower_node_diff_type == DiffType::Unmodified {
+                    FileNode::derive_diff_type(
+                        Rc::clone(&pair.lower_node),
+                        pair.tentative.unwrap(),
+                    );
+                }
+                // persist the upper's payload on the lower tree
+                pair.lower_node.borrow_mut().data.file_info =
+                    pair.upper_node.borrow().data.file_info.clone();
+            }
+        }
+    }
 
     // fetches a single node when given a slash-delimited string from root('/') to the desired node (e.g. '/a/node/path')
     pub fn get_node(tree: Rc<RefCell<Self>>, path: &str) -> Option<Rc<RefCell<FileNode>>> {
@@ -67,11 +188,16 @@ impl FileTree {
     }
 
     // adds a new node to the tree with the given payload
-    pub fn add_path(tree: Rc<RefCell<Self>>, path: &str, data: FileInfo) {
+    pub fn add_path(
+        tree: Rc<RefCell<Self>>,
+        path: &str,
+        data: FileInfo,
+    ) -> (Option<Rc<RefCell<FileNode>>>, Vec<Rc<RefCell<FileNode>>>) {
+        let mut added_nodes = vec![];
         let path = clean(path);
         // cannot add relative path
         if path.eq(".") {
-            return;
+            return (None, added_nodes);
         }
         let mut node = Rc::clone(&tree.borrow().root);
         for node_name in path.trim_matches('/').split('/') {
@@ -86,13 +212,15 @@ impl FileTree {
             }
             // don't add paths that should be deleted
             if node_name.starts_with(DOUBLE_WHITEOUT_PREFIX) {
-                return;
+                return (None, added_nodes);
             }
             // don't attach the payload. The payload is destined for the Path's end node, not any intermediary node.
             node = FileNode::add_child(Rc::clone(&node), node_name, Default::default());
+            added_nodes.push(Rc::clone(&node));
         }
         // attach payload to the last specified node
         node.borrow_mut().data.file_info = data;
+        (Some(node), added_nodes)
     }
 
     // removes a node from the tree given its path
@@ -100,6 +228,33 @@ impl FileTree {
         if let Some(node) = Self::get_node(tree, path) {
             FileNode::remove(node);
         }
+    }
+
+    pub fn build_from_layer_tar<R: Read>(ar: Archive<R>) -> Result<Rc<RefCell<Self>>> {
+        let tree = Rc::new(RefCell::new(FileTree::default()));
+        {
+            let a = tree.borrow();
+            let mut root = a.root.borrow_mut();
+            root.tree = Rc::downgrade(&tree);
+            //root.path = "/".to_string(); // root路径初始值设为空，因为添加子结点都会加/前缀； 可以在最后再设为/
+        }
+        let file_infos = FileInfo::get_file_infos(ar)?;
+        for file_info in file_infos.into_iter() {
+            let path = file_info.path.clone();
+            tree.borrow_mut().file_size += file_info.size;
+            FileTree::add_path(Rc::clone(&tree), &path, file_info);
+        }
+        // root的path设为/
+        tree.borrow().root.borrow_mut().path = "/".to_string();
+        // 把数据移出rc会导致所有的weak无法升级
+        //match Rc::try_unwrap(tree) {
+        //Ok(ret) => Ok(ret.take()),
+        //Err(origial) => Err(DockerArchiveError::InternalLogicError(format!(
+        //"Rc<FileTree> has more than one strong reference: {}",
+        //Rc::strong_count(&origial)
+        //))),
+        //}
+        Ok(tree)
     }
 }
 
@@ -116,12 +271,52 @@ pub struct FileNode {
     pub path: String,
 }
 
-// Visitor is a function that processes, observes, or otherwise transforms the given node
-pub type FileNodeVistor = fn(Rc<RefCell<FileNode>>) -> ();
-// VisitEvaluator is a function that indicates whether the given node should be visited by a Visitor
-pub type FileNodeVisitEvaluator = fn(&FileNode) -> bool;
-
 impl FileNode {
+    // duplicates the existing node relative to a new parent node
+    pub fn copy(node: Rc<RefCell<Self>>, parent: Rc<RefCell<Self>>) -> Rc<RefCell<Self>> {
+        let new_node = Self {
+            tree: Weak::clone(&parent.borrow().tree),
+            parent: Rc::downgrade(&parent),
+            name: node.borrow().name.clone(),
+            data: node.borrow().data.clone(),
+            path: node.borrow().path.clone(),
+            ..Default::default()
+        };
+        let new_node = Rc::new(RefCell::new(new_node));
+        for (name, child) in node.borrow().children.iter() {
+            let new_child = Self::copy(Rc::clone(child), Rc::clone(&new_node));
+            new_node
+                .borrow_mut()
+                .children
+                .insert(name.clone(), new_child);
+        }
+        new_node
+    }
+
+    // determines a DiffType to the current FileNode. Note: the DiffType of a node is always the DiffType of its attributes and its contents. The contents are the bytes of the file of the children of a directory
+    pub fn derive_diff_type(node: Rc<RefCell<Self>>, diff_type: DiffType) {
+        let leaf = node.borrow().is_leaf();
+        if leaf {
+            return Self::assign_diff_type(node, diff_type);
+        }
+        let mut my_diff_type = diff_type;
+        for child in node.borrow().children.values() {
+            my_diff_type = my_diff_type.merge(child.borrow().data.diff_type);
+        }
+        return Self::assign_diff_type(node, my_diff_type);
+    }
+
+    // assign the given DiffType to this node, possibly affecting child nodes
+    pub fn assign_diff_type(node: Rc<RefCell<Self>>, diff_type: DiffType) {
+        node.borrow_mut().data.diff_type = diff_type;
+        // if we've removed this node, then all children have been removed as well
+        if matches!(diff_type, DiffType::Removed) {
+            for child in node.borrow().children.values() {
+                FileNode::assign_diff_type(Rc::clone(child), diff_type);
+            }
+        }
+    }
+
     pub fn add_child(parent: Rc<RefCell<Self>>, name: &str, data: FileInfo) -> Rc<RefCell<Self>> {
         // never allow processing of purely whiteout flag files (for now)
         // doublewhiteout 作用？
@@ -213,11 +408,12 @@ impl FileNode {
     }
 
     // iterates a tree depth-first (starting at this FileNode), evaluating the deepest depths first (visit on bubble up)
-    pub fn visit_depth_child_first(
-        node: Rc<RefCell<Self>>,
-        visitor: FileNodeVistor,
-        evaluator: FileNodeVisitEvaluator,
-    ) {
+    pub fn visit_depth_child_first<V, E>(node: Rc<RefCell<Self>>, visitor: &mut V, evaluator: &E)
+    where
+        V: FnMut(Rc<RefCell<FileNode>>) -> (),
+        E: Fn(&FileNode) -> bool,
+    {
+        // 根据字符串排序，保证父目录优先被处理（对比tree时父目录标记为删除要同时标记子结点）
         for (_, v) in node.borrow().children.iter().sorted_by_key(|x| x.0) {
             let child = Rc::clone(v);
             FileNode::visit_depth_child_first(child, visitor, evaluator);
@@ -236,11 +432,11 @@ impl FileNode {
     }
 
     // iterates a tree depth-first (starting at this FileNode), evaluating the shallowest depths first (visit while sinking down)
-    pub fn visit_depth_parent_first(
-        node: Rc<RefCell<Self>>,
-        visitor: FileNodeVistor,
-        evaluator: FileNodeVisitEvaluator,
-    ) {
+    pub fn visit_depth_parent_first<V, E>(node: Rc<RefCell<Self>>, visitor: &mut V, evaluator: &E)
+    where
+        V: FnMut(Rc<RefCell<FileNode>>) -> (),
+        E: Fn(&FileNode) -> bool,
+    {
         if !evaluator(&node.borrow()) {
             return;
         }
@@ -261,37 +457,8 @@ impl FileNode {
     }
 }
 
-impl<R: Read> TryFrom<Archive<R>> for FileTree {
-    type Error = crate::error::DockerArchiveError;
-
-    fn try_from(ar: Archive<R>) -> Result<Self> {
-        let tree = Rc::new(RefCell::new(FileTree::default()));
-        {
-            let a = tree.borrow();
-            let mut root = a.root.borrow_mut();
-            root.tree = Rc::downgrade(&tree);
-            //root.path = "/".to_string(); // root路径初始值设为空，因为添加子结点都会加/前缀； 可以在最后再设为/
-        }
-        let file_infos = FileInfo::get_file_infos(ar)?;
-        for file_info in file_infos.into_iter() {
-            let path = file_info.path.clone();
-            tree.borrow_mut().file_size += file_info.size;
-            FileTree::add_path(Rc::clone(&tree), &path, file_info);
-        }
-        // root的path设为/
-        tree.borrow().root.borrow_mut().path = "/".to_string();
-        match Rc::try_unwrap(tree) {
-            Ok(ret) => Ok(ret.take()),
-            Err(origial) => Err(DockerArchiveError::InternalLogicError(format!(
-                "Rc<FileTree> has more than one strong reference: {}",
-                Rc::strong_count(&origial)
-            ))),
-        }
-    }
-}
-
 // NodeData is the payload for a FileNode
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Clone)]
 pub struct NodeData {
     pub view_info: ViewInfo,
     pub file_info: FileInfo,
@@ -299,14 +466,14 @@ pub struct NodeData {
 }
 
 // ViewInfo contains UI specific detail for a specific FileNode
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Clone)]
 pub struct ViewInfo {
     pub collapsed: bool,
     pub hidden: bool,
 }
 
 // FileInfo contains tar metadata for a specific FileNode
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Clone)]
 pub struct FileInfo {
     pub path: String,
     pub type_flag: u8,
@@ -396,7 +563,7 @@ impl From<&tar::Header> for FileInfo {
 }
 
 // DiffType defines the comparison result between two FileNodes
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq)]
 pub enum DiffType {
     Unmodified,
     Modified,
@@ -407,5 +574,15 @@ pub enum DiffType {
 impl Default for DiffType {
     fn default() -> Self {
         Self::Unmodified
+    }
+}
+
+impl DiffType {
+    // merge two DiffTypes into a single result. Essentially, return the given value unless they two values differ, in which case we can only determine that there is "a change".
+    pub fn merge(self, other: Self) -> DiffType {
+        if self.eq(&other) {
+            return self;
+        }
+        return Self::Modified;
     }
 }
