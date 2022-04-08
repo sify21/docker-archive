@@ -188,7 +188,7 @@ impl ImageArchive {
         Ok(img)
     }
 
-    pub fn combined_tree(&self) -> Rc<RefCell<FileTree>> {
+    pub fn merged_tree(&self) -> Rc<RefCell<FileTree>> {
         FileTree::stack_trees(
             self.manifest
                 .layer_tar_paths
