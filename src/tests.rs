@@ -30,31 +30,17 @@ fn test_remove() -> Result<()> {
 }
 
 #[test]
-fn test_tar() -> Result<()> {
-    let img = ImageArchive::new_from_file("/tmp/postgres.tar")?;
-    assert_eq!(img.manifest.layer_tar_paths.len(), 13);
-    let tree = img.merged_tree();
-    let mut out = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .create(true)
-        .open("/tmp/postgres.json")?;
-    serde_json::to_writer_pretty(&mut out, &*(tree.borrow()))?;
-    Ok(())
-}
-
-#[test]
 fn test_search() -> Result<()> {
-    let img = ImageArchive::new_from_file("/tmp/postgres.tar")?;
+    let img = ImageArchive::new_from_url("postgres:13")?;
     let tree = img.merged_tree();
-    for path in FileTree::search(tree, &|node| {
-        !node.data.file_info.is_dir && node.name.starts_with("psql")
+    let ret: Vec<String> = FileTree::search(tree, &|node| {
+        !node.data.file_info.is_dir && node.name.eq("psql")
     })
     .iter()
     .map(|node| node.borrow().path.clone())
     .sorted()
-    {
-        println!("{}", path);
-    }
+    .collect();
+    assert_eq!(2, ret.len());
+    println!("{:?}", ret);
     Ok(())
 }
