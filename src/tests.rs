@@ -4,6 +4,7 @@ use crate::FileTree;
 use crate::ImageArchive;
 use crate::Result;
 use std::fs::OpenOptions;
+use std::rc::Rc;
 
 #[test]
 fn test_url() -> Result<()> {
@@ -19,10 +20,20 @@ fn test_url() -> Result<()> {
 }
 
 #[test]
+fn test_remove() -> Result<()> {
+    let img = ImageArchive::new_from_url("postgres:13")?;
+    let tree = img.merged_tree();
+    assert!(FileTree::get_node(Rc::clone(&tree), "/usr/local/share").is_some());
+    FileTree::remove_path(Rc::clone(&tree), "/usr/local/share");
+    assert!(FileTree::get_node(Rc::clone(&tree), "/usr/local/share").is_none());
+    Ok(())
+}
+
+#[test]
 fn test_tar() -> Result<()> {
     let img = ImageArchive::new_from_file("/tmp/postgres.tar")?;
     assert_eq!(img.manifest.layer_tar_paths.len(), 13);
-    let tree = img.combined_tree();
+    let tree = img.merged_tree();
     let mut out = OpenOptions::new()
         .write(true)
         .truncate(true)
@@ -35,7 +46,7 @@ fn test_tar() -> Result<()> {
 #[test]
 fn test_search() -> Result<()> {
     let img = ImageArchive::new_from_file("/tmp/postgres.tar")?;
-    let tree = img.combined_tree();
+    let tree = img.merged_tree();
     for path in FileTree::search(tree, &|node| {
         !node.data.file_info.is_dir && node.name.starts_with("psql")
     })

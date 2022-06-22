@@ -10,6 +10,8 @@ use tar::{Archive, EntryType};
 use uuid::Uuid;
 use xxhash_rust::xxh3::xxh3_64;
 
+// TODO https://github.com/moby/moby/issues/43279
+// https://github.com/wagoodman/dive/issues/391
 const WHITEOUT_PREFIX: &'static str = ".wh.";
 const DOUBLE_WHITEOUT_PREFIX: &'static str = ".wh..wh..";
 
@@ -383,8 +385,9 @@ impl FileNode {
         if let Some(parent) = node.borrow().parent.upgrade() {
             parent.borrow_mut().children.remove(&node.borrow().name);
         }
-        for child in node.borrow().children.values() {
-            FileNode::remove(Rc::clone(child));
+        let childs: Vec<Rc<RefCell<Self>>> = node.borrow().children.values().cloned().collect();
+        for child in childs.into_iter() {
+            FileNode::remove(child);
         }
     }
 
