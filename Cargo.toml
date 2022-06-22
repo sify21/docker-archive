@@ -1,6 +1,6 @@
 [package]
 name = "docker-archive"
-version = "0.0.3"
+version = "0.0.5"
 edition = "2021"
 authors = ["sify21@163.com"]
 license = "MIT"
