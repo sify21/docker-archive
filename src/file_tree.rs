@@ -61,7 +61,7 @@ impl FileTree {
     {
         let mut ret = vec![];
         let root = Rc::clone(&tree.borrow().root);
-        FileNode::visit_depth_parent_first(
+        FileNode::visit_depth_child_first(
             root,
             &mut |node| {
                 ret.push(node);
