@@ -58,9 +58,12 @@ pub struct HistoryEntry {
     pub id: String,
     #[serde(default)]
     pub size: u64,
+    // maybe missing, see https://www.jfrog.com/jira/browse/RTFACT-26005
+    #[serde(default)]
     pub created: String,
     #[serde(default)]
     pub author: String,
+    #[serde(default)]
     pub created_by: String,
     #[serde(default)]
     pub empty_layer: bool,
